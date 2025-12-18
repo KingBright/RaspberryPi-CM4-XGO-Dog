@@ -1,0 +1,15 @@
+[Unit]
+Description=Dog App
+After=network.target sound.target
+
+[Service]
+Type=simple
+WorkingDirectory=/home/jinliang/dog_app
+ExecStart=/usr/bin/python3 -u /home/jinliang/dog_app/main_app.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/home/jinliang/dog_app/startup.log
+StandardError=append:/home/jinliang/dog_app/startup.log
+
+[Install]
+WantedBy=default.target

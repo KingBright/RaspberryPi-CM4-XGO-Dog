@@ -1,0 +1,391 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+        content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, orientation=landscape">
+    <title>XGO Controller</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=10">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/nipplejs/0.7.3/nipplejs.min.js"></script>
+    <!-- FontAwesome for Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+</head>
+
+<body>
+    <div class="game-controller">
+
+        <!-- Top Bar -->
+        <div class="top-bar">
+            <!-- Left: Logo -->
+            <div class="logo">🐶</div>
+
+            <!-- Center/Right: Status Items (Moved from video overlay) -->
+            <div class="status-bar-inline">
+                <div class="status-item"><i class="fas fa-battery-half"></i> <span id="s-bat">--%</span></div>
+                <div class="status-item"><i class="fas fa-face-smile"></i> <span id="s-emo">Neutral</span></div>
+                <div class="status-item small-text">
+                    R:<span id="s-roll">0</span> P:<span id="s-pitch">0</span> Y:<span id="s-yaw">0</span>
+                </div>
+            </div>
+
+            <!-- Right: Menu Button -->
+            <button class="menu-btn" onclick="toggleMenu()"><i class="fas fa-bars"></i></button>
+        </div>
+
+        <!-- Hidden Menu Panel -->
+        <div id="menu-panel" class="menu-panel">
+            <div class="control-group">
+                <h3>System</h3>
+                <div style="display:flex; gap:10px;">
+                    <button class="primary" onclick="toggleMotors(true)">⚡ Load Motors</button>
+                    <button class="action-btn danger" onclick="toggleMotors(false)">💤 Unload</button>
+                </div>
+                <!-- Eco Mode Buttons -->
+                <div style="display:flex; gap:10px; margin-top:10px;">
+                    <button id="btn-eco-on" class="action-btn" onclick="toggleEcoMode(true)" style="flex:1;">
+                        🌱 Eco ON
+                    </button>
+                    <button id="btn-eco-off" class="action-btn" onclick="toggleEcoMode(false)" style="flex:1;">
+                        ⚡ Eco OFF
+                    </button>
+                </div>
+            </div>
+            <div class="control-group"> <!-- START NEXT GROUP -->
+                <h3>Voice Command</h3>
+                <input type="text" id="voice-input" placeholder="Type command...">
+                <button class="primary" onclick="sendVoice()" style="margin-top:5px;">Send</button>
+            </div>
+            <div class="control-group">
+                <h3>Settings</h3>
+                <label>System Volume: <span id="val-volume">80</span>%</label>
+                <input type="range" id="slider-volume" min="0" max="100" value="80">
+                <br>
+                <label>Step Height: <span id="val-height">20</span></label>
+                <input type="range" id="slider-height" min="0" max="50" value="20">
+            </div>
+            <button class="action-btn danger" onclick="stopSkill()" style="width:100%; margin-top:10px;">🛑 Stop All
+                Skills</button>
+        </div>
+
+        <!-- Main Stage (Joysticks + Video) -->
+        <div class="main-stage">
+
+            <!-- Left Joystick Zone -->
+            <div id="zone_left" class="joystick-zone left"></div>
+
+            <!-- Video Center -->
+            <div class="video-container">
+                <!-- Video feed img with empty src initially to prevent loading if in Eco Mode -->
+                <!-- We store the URL in data-src and load it via JS if Eco Mode is OFF -->
+                <img id="video-feed" data-src="{{ url_for('video_feed') }}" src="" alt="Video Feed"
+                    style="display:none;">
+                <div id="status-overlay">Checking status...</div>
+            </div>
+
+            <!-- Right Joystick Zone -->
+            <div id="zone_right" class="joystick-zone right"></div>
+        </div>
+
+        <!-- UI Interaction Blocker (Backdrop) -->
+        <div id="ui-backdrop" class="ui-backdrop" onclick="closeAllMenus()"></div>
+
+        <!-- Action Bar Toggle Button -->
+        <button id="action-toggle" class="action-toggle-btn" onclick="toggleActionBar()">
+            <i class="fas fa-chevron-up"></i> Actions
+        </button>
+
+        <!-- Bottom Action Bar (Drawer Mode) -->
+        <div id="action-bar" class="action-bar">
+            <!-- Buttons directly in the grid container -->
+            <div class="action-btn" onclick="sendCustomAction('happy_dance')"><i class="fas fa-music"></i>Happy</div>
+            <div class="action-btn" onclick="sendCustomAction('shake')"><i class="fas fa-paw"></i>Shake</div>
+            <div class="action-btn" onclick="sendCustomAction('curious')"><i class="fas fa-question"></i>Curious</div>
+            <div class="action-btn" onclick="sendCustomAction('boxing')"><i class="fas fa-fist-raised"></i>Boxing</div>
+            <div class="action-btn" onclick="sendSkill('BallTracking')"><i class="fas fa-futbol"></i>Track</div>
+            <div class="action-btn" onclick="sendAction(22)">Look</div>
+            <div class="action-btn" onclick="sendAction(23)">Dance</div>
+            <div class="action-btn" onclick="sendAction(24)">Naughty</div>
+
+            <!-- Arm Actions -->
+            <div class="action-btn" onclick="sendAction(128)">Grab Up</div>
+            <div class="action-btn" onclick="sendAction(129)">Grab Mid</div>
+            <div class="action-btn" onclick="sendAction(130)">Grab Low</div>
+        </div>
+
+        <script>
+            const socket = io();
+
+            // --- Status Updates ---
+            socket.on('connect', function () {
+                console.log("Connected to server");
+                // Explicitly request Eco Status to ensure UI sync
+                socket.emit('get_eco_status');
+            });
+
+            function toggleBackdrop(show) {
+                const bd = document.getElementById('ui-backdrop');
+                const zoneL = document.getElementById('zone_left');
+                const zoneR = document.getElementById('zone_right');
+
+                if (show) {
+                    bd.classList.add('active');
+                    // Disable joysticks to prevent bleed-through
+                    zoneL.classList.add('no-interaction');
+                    zoneR.classList.add('no-interaction');
+                } else {
+                    bd.classList.remove('active');
+                    zoneL.classList.remove('no-interaction');
+                    zoneR.classList.remove('no-interaction');
+                }
+            }
+
+            function closeAllMenus() {
+                document.getElementById('menu-panel').classList.remove('active');
+
+                const bar = document.getElementById('action-bar');
+                if (bar.classList.contains('active')) toggleActionBar(); // Use toggle to reset button state
+
+                toggleBackdrop(false);
+            }
+
+            function toggleActionBar() {
+                const bar = document.getElementById('action-bar');
+                const btn = document.getElementById('action-toggle');
+                bar.classList.toggle('active');
+
+                toggleBackdrop(bar.classList.contains('active'));
+
+                if (bar.classList.contains('active')) {
+                    btn.innerHTML = '<i class="fas fa-chevron-down"></i> Hide';
+                    btn.style.opacity = '0.7';
+                    // Close Menu if open
+                    document.getElementById('menu-panel').classList.remove('active');
+                } else {
+                    btn.innerHTML = '<i class="fas fa-chevron-up"></i> Actions';
+                    btn.style.opacity = '1';
+                }
+            }
+
+            // --- Status Updates ---
+            // --- Status Updates ---
+            socket.on('status_update', (data) => {
+                console.log("Status received:", data); // Debug log in console
+                if (data.battery !== undefined) document.getElementById('s-bat').innerText = data.battery + "%";
+                if (data.emotion !== undefined) document.getElementById('s-emo').innerText = data.emotion;
+                if (data.roll !== undefined) document.getElementById('s-roll').innerText = data.roll + "°";
+                if (data.pitch !== undefined) document.getElementById('s-pitch').innerText = data.pitch + "°";
+                if (data.yaw !== undefined) document.getElementById('s-yaw').innerText = data.yaw + "°";
+            });
+
+            // --- Menu Toggle ---
+            // --- Menu Toggle ---
+            function toggleMenu() {
+                const menu = document.getElementById('menu-panel');
+                menu.classList.toggle('active');
+                toggleBackdrop(menu.classList.contains('active'));
+
+                // Close Action Bar if open to prevent overlap confusion
+                if (menu.classList.contains('active')) {
+                    const bar = document.getElementById('action-bar');
+                    if (bar.classList.contains('active')) toggleActionBar();
+                }
+            }
+
+            // --- Joysticks ---
+            // Left: Movement (Static, Bottom-Left corner relative to zone)
+            const joyLeft = nipplejs.create({
+                zone: document.getElementById('zone_left'),
+                mode: 'static',
+                position: { left: '50%', top: '50%' },
+                color: 'cyan',
+                size: 100
+            });
+
+            joyLeft.on('move', (evt, data) => {
+                if (data && data.angle) {
+                    const angle = data.angle.degree;
+                    const force = Math.min(data.force, 2.0) / 2.0;
+
+                    const rad = angle * (Math.PI / 180);
+                    const x_joy = Math.cos(rad) * force;
+                    const y_joy = Math.sin(rad) * force;
+
+                    let cmd_x = y_joy * 25;
+                    let cmd_y = -x_joy * 15;
+
+                    socket.emit('move_command', { x: cmd_x, y: cmd_y, turn: 0 });
+                }
+            });
+            joyLeft.on('end', () => socket.emit('move_command', { x: 0, y: 0, turn: 0 }));
+
+
+            // Right: Heading/Turn (Static)
+            const joyRight = nipplejs.create({
+                zone: document.getElementById('zone_right'),
+                mode: 'static',
+                position: { left: '50%', top: '50%' },
+                color: 'magenta',
+                size: 100
+            });
+
+            let lastRightEmit = 0;
+            joyRight.on('move', (evt, data) => {
+                const now = Date.now();
+                if (now - lastRightEmit < 100) return; // Throttle to 100ms
+                lastRightEmit = now;
+
+                // Log raw data presence for debugging
+                // socket.emit('client_log', { msg: `RightRaw: ${data ? 'OK' : 'Null'} Angle: ${data && data.angle ? 'Yes' : 'No'}` });
+
+                if (data && data.angle) {
+                    const angle = data.angle.degree;
+                    const force = Math.min(data.force, 2.0) / 2.0;
+
+                    const rad = angle * (Math.PI / 180);
+                    const x = Math.cos(rad) * force;
+                    const y = Math.sin(rad) * force;
+
+                    socket.emit('client_log', { msg: `RightStick: x=${x.toFixed(2)}, y=${y.toFixed(2)}` });
+
+                    // Yaw (Turn) - x ranges -1 to 1. 
+                    // x=1 (Right) -> Turn Right (Negative speed in xgolib) -> speed -60
+                    socket.emit('turn_command', { speed: x * -60 });
+
+                    // Pitch - y ranges -1 to 1.
+                    // y=1 (Up) -> Pitch Up (Positive value) -> value 15
+                    socket.emit('pitch_command', { value: y * 15 });
+                }
+            });
+            joyRight.on('end', () => {
+                socket.emit('turn_command', { speed: 0 });
+                socket.emit('client_log', { msg: 'RightStick: Release' });
+            });
+
+
+            // --- Actions ---
+            function sendAction(id) { socket.emit('robot_command', { command: 'action', value: id }); }
+            function sendCustomAction(name) { socket.emit('custom_action', { command: 'custom_action', value: name }); }
+            function sendSkill(name) { socket.emit('skill_command', { command: 'skill_command', value: name, action: 'start' }); }
+            function stopSkill() { socket.emit('skill_command', { command: 'skill_command', value: '', action: 'stop' }); }
+
+            // --- Voice Command ---
+            function sendVoice() {
+                const input = document.getElementById('voice-input');
+                if (input && input.value) {
+                    socket.emit('voice_command', { text: input.value });
+                    input.value = '';
+                    toggleMenu();
+                }
+            }
+
+            // --- Action Command ---
+            function performAction(name) {
+                socket.emit('action_command', { action: name });
+                toggleMenu();
+            }
+
+            // Height Slider
+            const slider = document.getElementById('slider-height');
+            slider.oninput = () => {
+                document.getElementById('val-height').innerText = slider.value;
+                socket.emit('robot_command', { command: 'height', value: slider.value });
+            };
+
+            // Volume Slider
+            const volSlider = document.getElementById('slider-volume');
+            if (volSlider) {
+                volSlider.oninput = () => {
+                    document.getElementById('val-volume').innerText = volSlider.value;
+                    // Debounce could be good, but direct emit is fine for low frequency
+                    socket.emit('volume_command', { value: volSlider.value });
+                };
+                // Set initial
+                socket.emit('volume_command', { value: volSlider.value });
+            }
+
+            function toggleMotors(load) {
+                console.log("ToggleMotors called:", load);
+                const action = load ? 'load' : 'unload';
+                socket.emit('client_log', { msg: `User Request: ${action}` });
+                socket.emit('motor_command', { action: action });
+                // Close menu after selection
+                toggleMenu();
+            }
+
+            // --- Eco Mode (Fast Charge) ---
+            let ecoMode = false;
+            function toggleEcoMode(enable) {
+                ecoMode = enable;
+                socket.emit('eco_mode', { enable: ecoMode });
+                // Optimistic UI update
+                updateEcoUI(ecoMode);
+                toggleMenu();
+            }
+
+            socket.on('eco_mode_response', function (data) {
+                ecoMode = data.enabled;
+                updateEcoUI(ecoMode);
+            });
+
+            function updateEcoUI(enabled) {
+                const btnOn = document.getElementById('btn-eco-on');
+                const btnOff = document.getElementById('btn-eco-off');
+                const video = document.getElementById('video-feed');
+                const overlay = document.getElementById('status-overlay');
+                const container = document.querySelector('.video-container'); // Get container
+
+                // Always hide status overlay when we get a definitive state
+                if (overlay) overlay.style.display = 'none';
+
+                if (enabled) {
+                    if (btnOn) btnOn.style.background = 'var(--correct-green)';
+                    if (btnOff) btnOff.style.background = ''; // reset
+
+                    // Disable video feed: HIDE the image entirely
+                    if (video) {
+                        video.src = "";
+                        video.style.display = 'none'; // Completely hide image/alt text
+                    }
+                    if (container) {
+                        container.style.backgroundColor = '#000'; // Ensure container is black
+
+                        // Insert text placeholder if not present
+                        let p = document.getElementById('eco-msg');
+                        if (!p) {
+                            p = document.createElement('div');
+                            p.id = 'eco-msg';
+                            p.className = 'eco-overlay'; // Use CSS class
+                            p.innerHTML = '<i class="fas fa-bolt"></i><div>Fast Charge Mode</div>';
+                            container.appendChild(p);
+                        }
+                        p.style.display = 'flex'; // Ensure flex display for column layout
+                    }
+
+                } else {
+                    if (btnOn) btnOn.style.background = '';
+                    if (btnOff) btnOff.style.background = '#444'; // default
+
+                    // Restore video
+                    if (container) {
+                        container.style.backgroundColor = ''; // Reset
+                        const p = document.getElementById('eco-msg');
+                        if (p) p.style.display = 'none';
+                    }
+
+                    if (video) {
+                        const dataSrc = video.getAttribute('data-src');
+                        if (dataSrc) {
+                            if (video.src.indexOf(dataSrc) === -1) video.src = dataSrc;
+                        }
+                        // Restore image visibility
+                        video.style.display = 'block';
+                        video.style.opacity = '1';
+                    }
+                }
+            }
+        </script>
+</body>
+
+</html>
